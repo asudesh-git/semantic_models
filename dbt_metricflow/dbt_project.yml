@@ -1,0 +1,20 @@
+name: 'auto_enterprise_dbt'
+version: '1.8.0'
+config-version: 2
+
+profile: 'sa_demo_agentic_bigquery'
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  auto_enterprise_dbt:
+    +materialized: table

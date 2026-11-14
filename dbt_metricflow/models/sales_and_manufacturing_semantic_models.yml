@@ -1,0 +1,208 @@
+version: 2
+
+models:
+  - name: fct_vehicle_sales_transactions
+    description: "Enriched omnichannel retail vehicle sales ledger in sa-demo-agentic.auto_sales_data.vehicle_sales_transactions (100,000 rows, PK: transaction_id)."
+    columns:
+      - name: transaction_id
+        description: "Primary key for settled retail vehicle transaction."
+      - name: sale_id
+        description: "Foreign key to vehicle_sales."
+      - name: vin
+        description: "Vehicle Identification Number sold."
+      - name: dealership
+        description: "Authorized retail dealership franchise."
+      - name: model
+        description: "Vehicle model sold."
+      - name: sale_price
+        description: "Actual retail transaction price in USD."
+      - name: production_cost
+        description: "OEM manufacturing cost of the vehicle in USD."
+      - name: profit_margin
+        description: "Realized gross margin (sale_price - production_cost) in USD."
+
+  - name: fct_dealership_profitability
+    description: "Dealership model-level profitability scorecard in sa-demo-agentic.auto_sales_data.dealership_profitability_metrics (PK: dealership, model)."
+    columns:
+      - name: dealership
+        description: "Dealership franchise name."
+      - name: model
+        description: "Vehicle model."
+      - name: total_revenue
+        description: "Total dealership revenue in USD."
+      - name: total_profit
+        description: "Total dealership gross profit in USD."
+      - name: profit_margin_pct
+        description: "Dealership net profit margin percentage."
+
+  - name: fct_quality_inspections
+    description: "Inbound and in-plant component quality inspection lots in sa-demo-agentic.auto_manufacturing_data.quality_inspections (120,004 rows, PK: inspection_id)."
+    columns:
+      - name: inspection_id
+        description: "Primary key for quality inspection lot."
+      - name: part_name
+        description: "Inspected part name."
+      - name: plant_id
+        description: "Manufacturing or supplier plant ID."
+      - name: defect_count
+        description: "Number of defects detected in the lot."
+      - name: pass_rate_pct
+        description: "Lot inspection pass rate percentage."
+
+semantic_models:
+  - name: sm_auto_retail_sales_transactions
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_sales_data.vehicle_sales_transactions
+      and customer_identity_crosswalk. Governs retail revenue, production cost, realized margin, and CSAT.
+    model: ref('fct_vehicle_sales_transactions')
+    defaults:
+      agg_time_dimension: transaction_date
+    entities:
+      - name: transaction_id
+        type: primary
+      - name: sale_id
+        type: foreign
+      - name: vin
+        type: foreign
+      - name: dealership
+        type: foreign
+      - name: model
+        type: foreign
+      - name: manufacturing_plant
+        type: foreign
+    dimensions:
+      - name: transaction_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: vehicle_type
+        type: categorical
+      - name: payment_method
+        type: categorical
+      - name: warranty_plan
+        type: categorical
+      - name: dealership_state
+        type: categorical
+    measures:
+      - name: sum_gross_sale_price
+        agg: sum
+        expr: sale_price
+        description: "Gross retail vehicle sales revenue in USD."
+      - name: sum_production_cost
+        agg: sum
+        expr: production_cost
+        description: "Total vehicle manufacturing cost in USD."
+      - name: sum_realized_profit_margin
+        agg: sum
+        expr: profit_margin
+        description: "Total realized gross margin in USD."
+      - name: transaction_count
+        agg: count
+        expr: transaction_id
+        description: "Total count of settled vehicle sales transactions."
+      - name: avg_customer_rating
+        agg: average
+        expr: customer_rating
+        description: "Average customer satisfaction star rating."
+
+  - name: sm_auto_dealership_profitability
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_sales_data.dealership_profitability_metrics.
+    model: ref('fct_dealership_profitability')
+    entities:
+      - name: dealership
+        type: primary
+      - name: model
+        type: foreign
+    dimensions:
+      - name: dealership_city
+        type: categorical
+      - name: dealership_state
+        type: categorical
+    measures:
+      - name: sum_dealer_revenue
+        agg: sum
+        expr: total_revenue
+      - name: sum_dealer_profit
+        agg: sum
+        expr: total_profit
+      - name: sum_units_sold
+        agg: sum
+        expr: total_units_sold
+      - name: avg_dealer_profit_margin_pct
+        agg: average
+        expr: profit_margin_pct
+
+  - name: sm_auto_manufacturing_lot_quality
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_manufacturing_data.quality_inspections.
+    model: ref('fct_quality_inspections')
+    defaults:
+      agg_time_dimension: inspect_date
+    entities:
+      - name: inspection_id
+        type: primary
+      - name: part_name
+        type: foreign
+      - name: plant_id
+        type: foreign
+    dimensions:
+      - name: inspect_date
+        type: time
+        type_params:
+          time_granularity: day
+    measures:
+      - name: sum_defect_count
+        agg: sum
+        expr: defect_count
+      - name: avg_pass_rate_pct
+        agg: average
+        expr: pass_rate_pct
+      - name: inspection_lot_count
+        agg: count
+        expr: inspection_id
+
+metrics:
+  - name: metric_gross_retail_sales_revenue_usd
+    label: "Gross Retail Sales Revenue (USD)"
+    description: "Total settled retail vehicle sales revenue: SUM(sale_price) FROM vehicle_sales_transactions."
+    type: simple
+    type_params:
+      measure: sum_gross_sale_price
+
+  - name: metric_realized_gross_margin_usd
+    label: "Realized Vehicle Gross Margin (USD)"
+    description: "Total realized gross margin: SUM(profit_margin) FROM vehicle_sales_transactions."
+    type: simple
+    type_params:
+      measure: sum_realized_profit_margin
+
+  - name: metric_realized_gross_margin_pct
+    label: "Realized Gross Margin (%)"
+    description: "Ratio of realized profit margin to gross retail sales revenue."
+    type: ratio
+    type_params:
+      numerator: metric_realized_gross_margin_usd
+      denominator: metric_gross_retail_sales_revenue_usd
+
+  - name: metric_dealership_net_profit_margin_pct
+    label: "Dealership Net Profit Margin (%)"
+    description: "Dealership net profitability percentage combining front-end sales and back-end service absorption."
+    type: simple
+    type_params:
+      measure: avg_dealer_profit_margin_pct
+
+  - name: metric_manufacturing_lot_pass_rate_pct
+    label: "Manufacturing Lot Inspection Pass Rate (%)"
+    description: "Average inbound and in-plant component quality inspection pass rate percentage."
+    type: simple
+    type_params:
+      measure: avg_pass_rate_pct
+
+  - name: metric_manufacturing_defects_per_lot
+    label: "Manufacturing Defects per Inspection Lot"
+    description: "Average defects detected per quality inspection lot: SUM(defect_count) / COUNT(inspection_id)."
+    type: ratio
+    type_params:
+      numerator: sum_defect_count
+      denominator: inspection_lot_count

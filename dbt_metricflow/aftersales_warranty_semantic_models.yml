@@ -1,0 +1,265 @@
+version: 2
+
+models:
+  - name: fct_warranty_claims
+    description: "Enterprise warranty claim adjudication fact table in sa-demo-agentic.auto_aftersales_data.warranty_claims (127,869 rows, PK: claim_id)."
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: claim_id
+        description: "Primary key for warranty claim."
+      - name: service_order_id
+        description: "Foreign key to service_orders."
+      - name: vin
+        description: "Foreign key to vehicle_ownership."
+      - name: part_name
+        description: "Foreign key to parts_inventory (failed component)."
+      - name: part_source_plant_name
+        description: "Foreign key to plants (Tier-1 supplier plant)."
+      - name: claim_amount
+        description: "Gross warranty claim amount in USD."
+      - name: claim_status
+        description: "Adjudication status (Approved, Pending, Under Review, Denied)."
+      - name: supplier_fault
+        description: "Boolean flag indicating causal defect originated at Tier-1 supplier."
+      - name: resolution_days
+        description: "Days taken to adjudicate claim."
+
+  - name: fct_service_orders
+    description: "Dealership repair order header table in sa-demo-agentic.auto_aftersales_data.service_orders (173,185 rows, PK: service_order_id)."
+    columns:
+      - name: service_order_id
+        description: "Primary key for dealership repair order."
+      - name: vin
+        description: "Vehicle Identification Number serviced."
+      - name: technician_id
+        description: "Certified technician handling the repair."
+      - name: dealership
+        description: "Dealership franchise performing the repair."
+      - name: total_cost
+        description: "Total repair order cost (labor_cost + parts_cost) in USD."
+      - name: customer_paid_amount
+        description: "Out-of-pocket amount paid by customer in USD."
+      - name: is_warranty_covered
+        description: "Boolean flag indicating OEM warranty coverage."
+
+  - name: fct_service_parts_usage
+    description: "Service order replacement parts line-item table in sa-demo-agentic.auto_aftersales_data.service_parts_usage (313,156 rows, PK: usage_id)."
+    columns:
+      - name: usage_id
+        description: "Primary key for replaced part line item."
+      - name: service_order_id
+        description: "Foreign key to service_orders."
+      - name: part_name
+        description: "Replaced part name."
+      - name: extended_cost
+        description: "Extended cost (quantity_used * unit_cost) in USD."
+      - name: defective_part_returned
+        description: "Boolean flag tracking physical core return required for 70% supplier chargeback recovery."
+
+semantic_models:
+  - name: sm_auto_warranty_adjudication
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_aftersales_data.warranty_claims
+      and v_semantic_aftersales_warranty_metrics. Powers governed warranty spend,
+      supplier chargeback recovery, and core-return leakage metrics.
+    model: ref('fct_warranty_claims')
+    defaults:
+      agg_time_dimension: claim_date
+    entities:
+      - name: claim_id
+        type: primary
+      - name: service_order_id
+        type: foreign
+      - name: vin
+        type: foreign
+      - name: part_name
+        type: foreign
+      - name: supplier_plant
+        type: foreign
+        expr: part_source_plant_name
+    dimensions:
+      - name: claim_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: claim_status
+        type: categorical
+      - name: defect_category
+        type: categorical
+      - name: root_cause
+        type: categorical
+      - name: supplier_fault
+        type: categorical
+      - name: model
+        type: categorical
+      - name: dealership
+        type: categorical
+    measures:
+      - name: sum_claim_amount
+        agg: sum
+        expr: claim_amount
+        description: "Total gross warranty claim spend across all statuses."
+      - name: approved_claim_spend
+        agg: sum
+        expr: "CASE WHEN claim_status = 'Approved' THEN claim_amount ELSE 0 END"
+        description: "Realized warranty cost across Approved warranty claims."
+      - name: supplier_fault_claim_spend
+        agg: sum
+        expr: "CASE WHEN claim_status = 'Approved' AND supplier_fault = TRUE THEN claim_amount ELSE 0 END"
+        description: "Approved warranty claim spend attributed to Tier-1 supplier defects."
+      - name: claim_count
+        agg: count
+        expr: claim_id
+        description: "Total count of warranty claims."
+      - name: avg_resolution_days
+        agg: average
+        expr: resolution_days
+        description: "Average days to adjudicate a warranty claim."
+
+  - name: sm_auto_service_bay_operations
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_aftersales_data.service_orders.
+      Tracks dealership repair order revenue, labor/parts split, OEM warranty absorption, and shop dwell time.
+    model: ref('fct_service_orders')
+    defaults:
+      agg_time_dimension: service_date
+    entities:
+      - name: service_order_id
+        type: primary
+      - name: vin
+        type: foreign
+      - name: technician_id
+        type: foreign
+      - name: dealership
+        type: foreign
+    dimensions:
+      - name: service_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: service_type
+        type: categorical
+      - name: service_channel
+        type: categorical
+      - name: is_warranty_covered
+        type: categorical
+    measures:
+      - name: sum_service_total_cost
+        agg: sum
+        expr: total_cost
+        description: "Total dealership repair order cost (labor + parts)."
+      - name: sum_labor_cost
+        agg: sum
+        expr: labor_cost
+        description: "Total service bay labor cost."
+      - name: sum_parts_cost
+        agg: sum
+        expr: parts_cost
+        description: "Total replacement parts cost."
+      - name: sum_customer_paid
+        agg: sum
+        expr: customer_paid_amount
+        description: "Total out-of-pocket amount paid by customers."
+      - name: sum_oem_warranty_absorbed_cost
+        agg: sum
+        expr: "CASE WHEN is_warranty_covered = TRUE THEN (total_cost - customer_paid_amount) ELSE 0 END"
+        description: "OEM Warranty Service Absorption across warranty-covered repair orders."
+      - name: avg_days_in_shop
+        agg: average
+        expr: days_in_shop
+        description: "Average vehicle dwell days in dealership service bay."
+
+  - name: sm_auto_service_parts_core_returns
+    description: >
+      dbt MetricFlow semantic model over sa-demo-agentic.auto_aftersales_data.service_parts_usage.
+      Tracks component replacement volume and defective core return compliance for supplier recovery.
+    model: ref('fct_service_parts_usage')
+    defaults:
+      agg_time_dimension: usage_date
+    entities:
+      - name: usage_id
+        type: primary
+      - name: service_order_id
+        type: foreign
+      - name: part_name
+        type: foreign
+      - name: supplier_plant
+        type: foreign
+        expr: part_source_plant_name
+    dimensions:
+      - name: usage_date
+        type: time
+        type_params:
+          time_granularity: day
+      - name: defective_part_returned
+        type: categorical
+    measures:
+      - name: sum_extended_part_cost
+        agg: sum
+        expr: extended_cost
+        description: "Total extended cost of replacement parts."
+      - name: sum_quantity_used
+        agg: sum
+        expr: quantity_used
+        description: "Total quantity of replacement parts installed."
+      - name: unreturned_core_line_count
+        agg: sum
+        expr: "CASE WHEN defective_part_returned = FALSE THEN 1 ELSE 0 END"
+        description: "Count of replacement part lines where defective core was NOT returned."
+      - name: returned_core_line_count
+        agg: sum
+        expr: "CASE WHEN defective_part_returned = TRUE THEN 1 ELSE 0 END"
+        description: "Count of replacement part lines where defective core was returned."
+
+metrics:
+  - name: metric_realized_warranty_cost_usd
+    label: "Realized Warranty Cost (USD)"
+    description: "Approved warranty claim spend: SUM(claim_amount) WHERE claim_status = 'Approved'."
+    type: simple
+    type_params:
+      measure: approved_claim_spend
+
+  - name: metric_recoverable_supplier_chargeback_usd
+    label: "Recoverable Supplier Chargeback (70% Core-Returned)"
+    description: "70% contractual recovery on Approved supplier_fault = TRUE warranty claims where LOGICAL_AND(defective_part_returned) = TRUE."
+    type: derived
+    type_params:
+      expr: "0.70 * supplier_fault_claim_spend"
+      metrics:
+        - name: metric_realized_warranty_cost_usd
+
+  - name: metric_unrecovered_supplier_leakage_usd
+    label: "Unrecovered Supplier Chargeback Leakage (USD)"
+    description: "70% supplier chargeback forfeited due to missing defective core returns (defective_part_returned = FALSE)."
+    type: derived
+    type_params:
+      expr: "0.70 * supplier_fault_claim_spend_unreturned"
+      metrics:
+        - name: metric_realized_warranty_cost_usd
+
+  - name: metric_net_oem_warranty_burden_usd
+    label: "Net OEM Warranty Burden (USD)"
+    description: "Realized Warranty Cost minus Recoverable Supplier Chargeback."
+    type: derived
+    type_params:
+      expr: "metric_realized_warranty_cost_usd - metric_recoverable_supplier_chargeback_usd"
+      metrics:
+        - name: metric_realized_warranty_cost_usd
+        - name: metric_recoverable_supplier_chargeback_usd
+
+  - name: metric_supplier_chargeback_recovery_rate
+    label: "Supplier Chargeback Recovery Rate (%)"
+    description: "Ratio of recovered supplier chargeback USD to total supplier-fault warranty spend."
+    type: ratio
+    type_params:
+      numerator: metric_recoverable_supplier_chargeback_usd
+      denominator: metric_realized_warranty_cost_usd
+
+  - name: metric_oem_service_bay_absorption_usd
+    label: "OEM Warranty Service Absorption (USD)"
+    description: "Total dealership repair cost absorbed by the OEM on warranty-covered repair orders."
+    type: simple
+    type_params:
+      measure: sum_oem_warranty_absorbed_cost
